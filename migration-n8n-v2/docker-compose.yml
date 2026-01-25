@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  n8n-main:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:3.20 AS apkstage
+        RUN apk add --no-cache apk-tools-static
+        FROM n8nio/n8n:2.4.6
+        USER root
+        COPY --from=apkstage /sbin/apk.static /sbin/apk.static
+        RUN mkdir -p /etc/apk && \
+            echo "http://dl-cdn.alpinelinux.org/alpine/latest-stable/main" > /etc/apk/repositories && \
+            echo "http://dl-cdn.alpinelinux.org/alpine/latest-stable/community" >> /etc/apk/repositories && \
+            /sbin/apk.static -U --allow-untrusted --no-cache add unzip zip
+        USER node
+    image: n8n-local:2.4.6-unzip
+    pull_policy: never
+
+    container_name: n8n-main
+    restart: always
+    ports:
+      - "5688:5678"
+    environment:
+      - GENERIC_TIMEZONE=Europe/Berlin
+      - TZ=Europe/Berlin
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_TRUST_PROXY=true
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+      - N8N_NATIVE_PYTHON_RUNNER=true
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_RUNNERS_ENABLED_TASK_TYPES=javascript,python
+      - NODES_EXCLUDE=[]
+      - N8N_SKIP_AUTH_ON_OAUTH_CALLBACK=true
+      - N8N_PROXY_HOPS=1
+
+    volumes:
+      - /home/n8n-data/n8ndata:/home/node/.n8n
+      - /home/n8n-data/Work/:/home/node/Work
+    networks:
+      - n8n-network
+
+  n8n-config-patcher:
+    image: n8nio/runners:2.4.6
+    container_name: n8n-config-patcher
+    restart: "no"
+    user: root
+    entrypoint: /bin/sh
+    volumes:
+      - /home/n8n-data/n8n-config:/host-config
+    command: >
+      -c "
+      set -e;
+      cp -f /etc/n8n-task-runners.json /host-config/n8n-task-runners.json;
+      sed -i '/\"runner-type\": \"javascript\"/,/\"allowed-env\": \\[/ s/\"allowed-env\": \\[/\"allowed-env\": [\"NODE_FUNCTION_ALLOW_BUILTIN\",\"NODE_FUNCTION_ALLOW_EXTERNAL\",/g' /host-config/n8n-task-runners.json;
+      sed -i 's/\"NODE_FUNCTION_ALLOW_BUILTIN\": *\"[^\"]*\"/\"NODE_FUNCTION_ALLOW_BUILTIN\": \"path\"/g' /host-config/n8n-task-runners.json;
+      sed -i 's/\"NODE_FUNCTION_ALLOW_EXTERNAL\": *\"[^\"]*\"/\"NODE_FUNCTION_ALLOW_EXTERNAL\": \"*\"/g' /host-config/n8n-task-runners.json;
+      sed -i '/\"runner-type\": \"python\"/,/\"allowed-env\": \\[/ s/\"allowed-env\": \\[/\"allowed-env\": [\"N8N_RUNNERS_STDLIB_ALLOW\",\"N8N_RUNNERS_EXTERNAL_ALLOW\",\"PYTHONPATH\",/g' /host-config/n8n-task-runners.json;
+      sed -i 's/\"N8N_RUNNERS_STDLIB_ALLOW\": *\"[^\"]*\"/\"N8N_RUNNERS_STDLIB_ALLOW\": \"os,pathlib\"/g' /host-config/n8n-task-runners.json;
+      sed -i 's/\"N8N_RUNNERS_EXTERNAL_ALLOW\": *\"[^\"]*\"/\"N8N_RUNNERS_EXTERNAL_ALLOW\": \"*\"/g' /host-config/n8n-task-runners.json;
+      chmod 644 /host-config/n8n-task-runners.json;
+      echo 'Patched runners config';
+      "
+    networks:
+      - n8n-network
+
+  n8n-runners:
+    image: n8nio/runners:2.4.6
+    container_name: n8n-runners
+    restart: always
+    environment:
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n-main:5679
+      - N8N_RUNNERS_ENABLED_TASK_TYPES=javascript,python
+      - N8N_RUNNERS_MAX_CONCURRENCY=10
+      - NODE_FUNCTION_ALLOW_BUILTIN=path
+      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - N8N_RUNNERS_STDLIB_ALLOW=os,pathlib
+      - N8N_RUNNERS_EXTERNAL_ALLOW=*
+      - PYTHONPATH=/opt/runners/task-runner-python
+    volumes:
+      - /home/n8n-data/n8n-config/n8n-task-runners.json:/etc/n8n-task-runners.json:ro
+    ports:
+      - "5680:5680"
+    networks:
+      - n8n-network
+    depends_on:
+      n8n-config-patcher:
+        condition: service_completed_successfully
+      n8n-main:
+        condition: service_started
+
+networks:
+  n8n-network:
+    driver: bridge
